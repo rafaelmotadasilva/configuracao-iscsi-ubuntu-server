@@ -1,186 +1,311 @@
 # Configuração do iSCSI no Ubuntu Server
 
-Este repositório fornece instruções passo a passo sobre como configurar o iSCSI no Ubuntu Server para acessar dispositivos de armazenamento remotos.
+Guia completo para configurar iSCSI no Ubuntu Server — tanto o lado **target (servidor de storage)** quanto o lado **iniciador (cliente)** que consome o disco remoto.
 
 ## Visão Geral
 
-O iSCSI (Internet Small Computer System Interface) é uma tecnologia que permite acessar dispositivos de armazenamento remotos através da rede TCP/IP.
+O iSCSI (Internet Small Computer System Interface) é uma tecnologia que permite acessar dispositivos de armazenamento remotos através da rede TCP/IP, fazendo com que um disco remoto apareça como um disco local no sistema operacional.
+
+```
+┌─────────────────┐        TCP/IP         ┌──────────────────────┐
+│   Iniciador     │ ◄──────────────────── │  Target (Storage)    │
+│  (cliente)      │    porta 3260          │  (servidor de disco) │
+│  open-iscsi     │                        │  targetcli / tgt     │
+└─────────────────┘                        └──────────────────────┘
+```
 
 ## Requisitos
 
-- Ubuntu Server 20.04 instalado e configurado
-- Acesso à internet
+- Ubuntu Server 20.04 ou superior
 - Permissões de administrador (sudo)
+- Conectividade de rede entre iniciador e target
 
-## Instruções
+## Índice
 
-1. [Instalação do Open-iSCSI](#instalação-do-open-iscsi)
-2. [Descobrir o IQN identificador unico do seu disco no storage](#descobrir-o-iqn-identificador-unico-do-seu-disco-no-storage)
-3. [Atualização do arquivo /etc/iscsi/initiatorname.iscsi](#atualização-do-arquivo-etciscsiinitiatornameiscsi)
-4. [Configurar credenciais](#configurar-credenciais)
-5. [Montagem do disco](#montagem-do-disco)
-6. [Automatização da montagem (Opcional)](#automatização-da-montagem-opcional)
-7. [Criação de uma partição e um sistema de arquivos (opcional)](#criação-de-uma-partição-e-um-sistema-de-arquivos-opcional)
-8. [Conclusão](#conclusão)
+1. [Configurar o Target (servidor de storage)](#1-configurar-o-target-servidor-de-storage)
+2. [Instalar o Open-iSCSI no iniciador](#2-instalar-o-open-iscsi-no-iniciador)
+3. [Descobrir os targets disponíveis](#3-descobrir-os-targets-disponíveis)
+4. [Atualizar o IQN do iniciador](#4-atualizar-o-iqn-do-iniciador)
+5. [Configurar autenticação CHAP](#5-configurar-autenticação-chap)
+6. [Ativar login automático e estabelecer sessão](#6-ativar-login-automático-e-estabelecer-sessão)
+7. [Identificar o disco no sistema](#7-identificar-o-disco-no-sistema)
+8. [Criar partição e sistema de arquivos (novo disco)](#8-criar-partição-e-sistema-de-arquivos-novo-disco)
+9. [Montar o disco](#9-montar-o-disco)
+10. [Automatizar a montagem com fstab](#10-automatizar-a-montagem-com-fstab)
 
-## Instalação do Open-iSCSI
+---
 
-Para começar, precisamos instalar o Open-iSCSI. Abra o terminal e execute o seguinte comando:
+## 1. Configurar o Target (servidor de storage)
+
+> Pule esta etapa se você já possui um NAS ou storage com iSCSI configurado.
+
+### Instalação do targetcli
+
+```bash
+sudo apt update
+sudo apt install targetcli-fb
+```
+
+### Configuração via targetcli
+
+```bash
+sudo targetcli
+```
+
+Dentro do shell interativo do targetcli:
 
 ```
+# 1. Criar um backstorage (arquivo ou dispositivo de bloco)
+/backstores/fileio> create nome_disco /caminho/para/arquivo.img 10G
+
+# Ou usando um dispositivo de bloco real:
+/backstores/block> create nome_disco /dev/sdb
+
+# 2. Criar um IQN para o target
+/iscsi> create iqn.2024-01.com.empresa:storage
+
+# 3. Criar um LUN vinculando ao backstore
+/iscsi/iqn.2024-01.com.empresa:storage/tpg1/luns> create /backstores/fileio/nome_disco
+
+# 4. Configurar ACL — definir qual iniciador pode acessar
+/iscsi/iqn.2024-01.com.empresa:storage/tpg1/acls> create iqn.2024-02.com.empresa:iniciador
+
+# 5. (Opcional) Configurar usuário e senha CHAP
+/iscsi/iqn.2024-01.com.empresa:storage/tpg1/acls/iqn.2024-02.com.empresa:iniciador> set auth userid=usuario password=senha
+
+# 6. Salvar e sair
+/> saveconfig
+/> exit
+```
+
+### Habilitar o serviço
+
+```bash
+sudo systemctl enable --now targetclid
+sudo systemctl enable --now rtslib-fb-targetctl
+```
+
+### Abrir a porta no firewall
+
+```bash
+sudo ufw allow 3260/tcp
+```
+
+---
+
+## 2. Instalar o Open-iSCSI no iniciador
+
+Execute no servidor que vai **consumir** o disco remoto:
+
+```bash
 sudo apt update
 sudo apt install open-iscsi
 ```
 
-Quando o pacote é instalado, ele cria os dois arquivos a seguir.
+A instalação cria dois arquivos de configuração:
 
-* `/etc/iscsi/iscsid.conf`
-* `/etc/iscsi/initiatorname.iscsi`
+- `/etc/iscsi/iscsid.conf` — configurações do daemon
+- `/etc/iscsi/initiatorname.iscsi` — IQN único deste iniciador
 
-## Descobrir o IQN identificador unico do seu disco no storage
+---
 
-O utilitário iscsiadm é uma ferramenta usada para a descoberta e o login para destinos iSCSI. Use o comando `iscsiadm` para realizar essa descoberta, inserindo o endereço IP de destino obtido do storage:
+## 3. Descobrir os targets disponíveis
 
-```
+Use `iscsiadm` para listar os targets que o storage expõe:
+
+```bash
 sudo iscsiadm -m discovery -t sendtargets -p <IP-do-Storage>
 ```
 
-## Atualização do arquivo `/etc/iscsi/initiatorname.iscsi`
-
-Atualize o arquivo `/etc/iscsi/initiatorname.iscsi` com o IQN do storage.
-
+A saída retorna os IQNs disponíveis, por exemplo:
 ```
-InitiatorName=iqn.2024-02.com.example:storage
+192.168.1.100:3260,1 iqn.2024-01.com.empresa:storage
 ```
 
-## Configurar credenciais
+---
 
-Edite as configurações a seguir no `/etc/iscsi/iscsid.conf` usando o nome do usuário e a senha do console do storage. Use maiúscula para nomes de CHAP.
+## 4. Atualizar o IQN do iniciador
+
+Edite o arquivo com o IQN que você configurou na ACL do target:
+
+```bash
+sudo vim /etc/iscsi/initiatorname.iscsi
+```
+
+```
+InitiatorName=iqn.2024-02.com.empresa:iniciador
+```
+
+---
+
+## 5. Configurar autenticação CHAP
+
+Se o target exige autenticação, edite `/etc/iscsi/iscsid.conf`:
+
+```bash
+sudo vim /etc/iscsi/iscsid.conf
+```
+
+Localize e edite as seguintes linhas (use maiúscula para os nomes de CHAP):
 
 ```
 node.session.auth.authmethod = CHAP
-node.session.auth.username = username
-node.session.auth.password = password
+node.session.auth.username = usuario
+node.session.auth.password = senha
+
 discovery.sendtargets.auth.authmethod = CHAP
-discovery.sendtargets.auth.username = username
-discovery.sendtargets.auth.password = password
-```
-Reinicie o serviço iscsi para que as mudanças entre em vigor.
-
-```
-systemctl restart iscsid.service
+discovery.sendtargets.auth.username = usuario
+discovery.sendtargets.auth.password = senha
 ```
 
-Configure o login automático.
+Reinicie o daemon para aplicar:
 
+```bash
+sudo systemctl restart iscsid
 ```
+
+---
+
+## 6. Ativar login automático e estabelecer sessão
+
+Configure o login automático ao iniciar:
+
+```bash
 sudo iscsiadm -m node --op=update -n node.conn[0].startup -v automatic
 sudo iscsiadm -m node --op=update -n node.startup -v automatic
 ```
 
-Ative os serviços necessários.
+Habilite e inicie os serviços:
 
-```
-systemctl enable open-iscsi
-systemctl enable iscsid
-```
-
-Reinicie o serviço iscsid.
-
-```
-systemctl restart iscsid.service
+```bash
+sudo systemctl enable open-iscsi
+sudo systemctl enable iscsid
+sudo systemctl restart iscsid
 ```
 
-Faça login na matriz iSCSI.
+Faça login no target:
 
-```
+```bash
 sudo iscsiadm -m node --loginall=automatic
 ```
 
-Valide se a sessão iSCSI foi estabelecida.
+Valide se a sessão foi estabelecida:
 
-```
+```bash
 iscsiadm -m session -o show
 ```
-## Montagem do disco
 
-Aqui estão os passos para montar o disco iSCSI:
+---
 
-**Identificação do dispositivo:** Primeiro você precisa identificar o dispositivo iSCSI que deseja montar. Isso pode ser feito usando o comando `blk` ou `fdisk-l` para listar todos os dispositivos disponíveis no sistema.
+## 7. Identificar o disco no sistema
 
-**Criação do ponto de montagem:** Escolha um diretório adequado no sistema de arquivos onde deseja montar o disco iSCSI. Você pode optar por criar um novo diretório existente, como `/mnt/iscsi` ou `/media/iscsi`.
+Após o login, o disco remoto aparece como um dispositivo local. Para identificá-lo:
 
-```
-sudo mkdir /mnt/iscsi
-```
-
-**Montagem do disco:**  Use o comando `mount` para montar o dispositivo iSCSI no diretório de montagem especificado. Substitua `/dev/sdb1` pelo nome do dispositivo iSCSI que você identificou anteriormente.
-
-```
-sudo mount /dev/sdb1 /mnt/iscsi
-```
-**Verificação da montagem:** Após a mensagem, verifique se o disco iSCSI está corretamente montado usando o comando `df-h` ou `mount`. Isso mostrará uma lista de todos os sistemas de arquivos montados, incluindo o disco iSCSI e e seu ponto de montagem.
-
-```
-df -h
-```
-## Criação de uma partição e um sistema de arquivos (opcional)
-
-Depois que o volume é montado e está acessível no host, é possível criar um sistema de arquivos. Siga essas etapas para criar um sistema de arquivos no volume recém-montado.
-
-Crie uma partição.
-
-```
-sudo fdisk /dev/sdb1
+```bash
+lsblk
 ```
 
-Crie o sistema de arquivos.
-
+```bash
+sudo fdisk -l
 ```
+
+O disco iSCSI normalmente aparece como `/dev/sdb`, `/dev/sdc`, etc.
+
+---
+
+## 8. Criar partição e sistema de arquivos (novo disco)
+
+> Pule esta etapa se o disco já está formatado.
+
+Crie uma partição (use o disco, não uma partição existente):
+
+```bash
+sudo fdisk /dev/sdb
+```
+
+Dentro do fdisk: `n` (nova partição) → `p` (primária) → `1` → Enter → Enter → `w` (gravar).
+
+Formate a partição criada:
+
+```bash
 sudo mkfs.xfs /dev/sdb1
 ```
 
-## Automatização da montagem (Opcional)
+Ou com ext4, se preferir:
 
-Para garantir que o disco iSCSI seja montado automaticamente na inicialização do sistema, você pode adicionar uma entrada ao arquivo `/etc/fstab`. Primeiro, precisamos obter o UUID do dispositivo iSCSI usando o comando `blkid`.
-
-Abra um terminal e execute o seguinte comando para obter o UUID do dispositivo iSCSI:
-
-```
-sudo blkid
+```bash
+sudo mkfs.ext4 /dev/sdb1
 ```
 
-Procure pelo dispositivo iSCSI na lista e anote o UUID associado a ele.
+---
 
-Agora, abra o arquivo `/etc/fstab` com um editor de texto:
+## 9. Montar o disco
 
-```
-vim /etc/fstab
-```
+Crie o ponto de montagem:
 
-Adicione uma nova linha ao final do arquivo usando o UUID do dispositivo iSCSI, o ponto de montagem (/mnt/iscsi, por exemplo), o tipo de sistema de arquivos (xfs, ext4, etc.) e as opções de montagem desejadas. Por exemplo:
-
-```
-UUID=<UUID-do-dispositivo>   /mnt/iscsi   xfs   defaults   0   0
+```bash
+sudo mkdir /mnt/iscsi
 ```
 
-Substitua <UUID-do-dispositivo> pelo UUID que você anotou anteriormente. Salve e feche o arquivo.
+Monte o dispositivo:
 
-Isso garantirá que o disco iSCSI seja montado automaticamente na inicialização do sistema.
+```bash
+sudo mount /dev/sdb1 /mnt/iscsi
+```
+
+Verifique a montagem:
+
+```bash
+df -h
+```
+
+---
+
+## 10. Automatizar a montagem com fstab
+
+Obtenha o UUID do dispositivo (mais confiável que o nome `/dev/sdX`):
+
+```bash
+sudo blkid /dev/sdb1
+```
+
+Abra o fstab:
+
+```bash
+sudo vim /etc/fstab
+```
+
+Adicione a linha ao final:
+
+```
+UUID=<UUID-do-dispositivo>   /mnt/iscsi   xfs   defaults,_netdev   0   0
+```
+
+> **`_netdev` é obrigatório para discos iSCSI.**
+> Sem essa opção, o sistema tentará montar o disco antes da rede subir e ficará
+> travado no boot caso o storage não esteja acessível.
+
+Teste a entrada sem reiniciar:
+
+```bash
+sudo mount -a
+```
+
+---
 
 ## Conclusão
 
-Parabéns! Você configurou com sucesso o iSCSI no seu Ubuntu Server.
+Com estes passos o disco iSCSI está disponível localmente e será remontado automaticamente após cada reinicialização, incluindo cenários onde o storage demora para ficar disponível na rede.
 
 ## Contribuição
 
-Se você tiver sugestões de melhorias ou correções para este guia, sinta-se à vontade para enviar uma pull request.
+Se você tiver sugestões de melhorias ou correções, sinta-se à vontade para enviar uma pull request.
 
 ## Referências
 
-- [Documentação IBM Cloud: Montagem de volumes do IBM Cloud Block Storage no Ubuntu 20.04](https://cloud.ibm.com/docs/BlockStorage?topic=BlockStorage-mountingUbu20&locale=pt-BR&interface=ui)
-- [Bacula Latam: Montagem de Discos Storage no Ubuntu via iSCSI](https://www.bacula.lat/montar-discos-storage-nas-via-iscsi/)
 - [Documentação oficial do Ubuntu: iSCSI](https://ubuntu.com/server/docs/service-iscsi)
+- [Documentação IBM Cloud: Montagem de volumes Block Storage no Ubuntu 20.04](https://cloud.ibm.com/docs/BlockStorage?topic=BlockStorage-mountingUbu20&locale=pt-BR&interface=ui)
+- [Bacula Latam: Montagem de Discos Storage via iSCSI](https://www.bacula.lat/montar-discos-storage-nas-via-iscsi/)
 
 ## Licença
 
