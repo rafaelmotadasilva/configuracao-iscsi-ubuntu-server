@@ -7,9 +7,9 @@ Guia completo para configurar iSCSI no Ubuntu Server — tanto o lado **target (
 O iSCSI (Internet Small Computer System Interface) é uma tecnologia que permite acessar dispositivos de armazenamento remotos através da rede TCP/IP, fazendo com que um disco remoto apareça como um disco local no sistema operacional.
 
 ```
-┌─────────────────┐        TCP/IP         ┌──────────────────────┐
-│   Iniciador     │ ◄──────────────────── │  Target (Storage)    │
-│  (cliente)      │    porta 3260          │  (servidor de disco) │
+┌─────────────────┐         TCP/IP         ┌──────────────────────┐
+│   Iniciador     │ ◄───────────────────── │  Target (Storage)    │
+│  (cliente)      │       porta 3260       │  (servidor de disco) │
 │  open-iscsi     │                        │  targetcli / tgt     │
 └─────────────────┘                        └──────────────────────┘
 ```
